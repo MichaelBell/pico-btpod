@@ -120,14 +120,65 @@ void get_audio(int16_t * pcm_buffer, int num_samples_to_write) {
     }
 }
 
+#define MAX_FNAME_LEN 80
+#define MAX_FILENAMES 128
+static char all_filenames[MAX_FNAME_LEN * MAX_FILENAMES];
+static int16_t filename_idx[MAX_FILENAMES];
+
 void core1_main() {
+    DIR dj = {};      /* Directory object */
+    FILINFO fno = {}; /* File information */
+    FRESULT fr = f_findfirst(&dj, &fno, "", "*.mp3");
+    if (FR_OK != fr) {
+        printf("f_findfirst error: %s (%d)\n", FRESULT_str(fr), fr);
+        return;
+    }
+
+    int idx = 0;
+    char* fname_ptr = all_filenames;
+
+    while (fr == FR_OK && fno.fname[0] && idx < MAX_FILENAMES) { /* Repeat while an item is found */
+        printf("Found: %s\n", fno.fname);
+        filename_idx[idx++] = fname_ptr - all_filenames;
+        fname_ptr = stpcpy(fname_ptr, fno.fname) + 1;
+
+        fr = f_findnext(&dj, &fno); /* Search for next item */
+    }
+    f_closedir(&dj);
+
+    std::sort(filename_idx, &filename_idx[idx], [](int16_t a, int16_t b) {
+        return strcmp(&all_filenames[a], &all_filenames[b]) < 0;
+    });
+
+    int num_files = idx;
+    bool first = true;
+
     while (1) {
-        if (!audio_valid_next) {
-            uint32_t samples_read;
-            musicFileRead(&mf, audio_buffer_next, AUDIO_BUFFER_LEN, &samples_read);
-            audio_valid_next = samples_read;
+        for (idx = 0; idx < num_files; ++idx) {
+            printf("Playing: %s\n", &all_filenames[filename_idx[idx]]);
+            if (!musicFileCreate(&mf, &all_filenames[filename_idx[idx]], mp3_cache_buffer, MP3_CACHE_BUFFER))
+            {
+                printf("Cannot open mp3 file\n");
+                return;
+            }
+
+            if (first) {
+                musicFileRead(&mf, audio_buffer, AUDIO_BUFFER_LEN, &audio_valid);
+                first = false;
+            }
+
+            while (1) {
+                if (!audio_valid_next) {
+                    uint32_t samples_read;
+                    bool ok = musicFileRead(&mf, audio_buffer_next, AUDIO_BUFFER_LEN, &samples_read);
+                    if (!ok) break;
+                    audio_valid_next = samples_read;
+                }
+                __wfe();
+            }
+
+            musicFileClose(&mf);
         }
-        __wfe();
     }
 }
 
@@ -144,14 +195,7 @@ int main() {
       return 0;
     }
 
-    printf("SD card mounted!");
-
-    if (!musicFileCreate(&mf, "test.mp3", mp3_cache_buffer, MP3_CACHE_BUFFER))
-    {
-        printf("Cannot open mp3 file\n");
-    }
-
-    musicFileRead(&mf, audio_buffer, AUDIO_BUFFER_LEN, &audio_valid);
+    printf("SD card mounted!\n");
 
     multicore_launch_core1(core1_main);
 
